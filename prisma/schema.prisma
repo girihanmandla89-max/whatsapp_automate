@@ -1,0 +1,155 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:../data/app_database.sqlite"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ----------------------------------------------------
+// 1. License & Security State
+// ----------------------------------------------------
+model LicenseCache {
+  id              String   @id @default("singleton")
+  licenseKey      String
+  licenseType     String   // "SUPER_ADMIN" | "ADMIN"
+  ownerEmail      String
+  status          String   // "ACTIVE" | "SUSPENDED" | "EXPIRED"
+  features        String   // comma-separated feature flags
+  maxClients      Int      @default(1)
+  monthlyMsgCap   Int      @default(10000)
+  validUntil      DateTime
+  machineFingerprint String
+  signature       String
+  lastVerifiedAt  DateTime @default(now())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ----------------------------------------------------
+// 2. Multi-Tenant Client Workspaces
+// ----------------------------------------------------
+model ClientWorkspace {
+  id              String         @id @default(uuid())
+  name            String
+  industry        String         @default("General") // RealEstate, Medical, Retail, Salon, Support
+  description     String?
+  phoneNumber     String?        // Bound WhatsApp number
+  whatsappStatus  String         @default("DISCONNECTED") // CONNECTED, DISCONNECTED, RECONNECTING
+  deviceBattery   Int?           // Battery percentage
+  devicePlatform  String?        // e.g. "SM-G998B (Android 14)"
+  enabledModules  String         @default("CORE,BROADCAST") // Comma-separated active modules
+  systemPrompt    String?        // Custom Gemini Persona
+  knowledgeContext String?       // Injected business knowledge/FAQs
+  businessHours   String?        // JSON string of active operating hours
+  googleSheetUrl  String?        // Destination Google Sheet for lead sync
+  geminiApiKey    String?        // Client's dedicated Gemini API key (optional override)
+  geminiModel     String?        @default("gemini-2.5-flash") // Selected AI model per client
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  contacts        Contact[]
+  chatMessages    ChatMessage[]
+  campaigns       Campaign[]
+  formResponses   FormResponse[]
+}
+
+// ----------------------------------------------------
+// 3. Contacts & Customer CRM
+// ----------------------------------------------------
+model Contact {
+  id              String          @id @default(uuid())
+  clientId        String
+  phoneNumber     String          // Customer phone number with country code
+  name            String?
+  tags            String?         // e.g. "HOT_LEAD, VIP, UNCHECKED"
+  leadScore       String?         @default("WARM") // HOT, WARM, COLD
+  isUnsubscribed  Boolean         @default(false)  // STOP opt-out
+  lastInteraction DateTime        @default(now())
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  client          ClientWorkspace @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  chatMessages    ChatMessage[]
+  formResponses   FormResponse[]
+
+  @@unique([clientId, phoneNumber])
+}
+
+// ----------------------------------------------------
+// 4. Live Chat & Sliding Memory Buffer
+// ----------------------------------------------------
+model ChatMessage {
+  id              String          @id @default(uuid())
+  clientId        String
+  contactId       String
+  senderType      String          // "CUSTOMER", "AI_AGENT", "HUMAN_AGENT", "SYSTEM"
+  messageBody     String
+  mediaUrl        String?
+  mediaType       String?         // "image", "audio", "document", "video"
+  isHumanTakeover Boolean         @default(false)
+  geminiTokens    Int             @default(0)
+  timestamp       DateTime        @default(now())
+
+  client          ClientWorkspace @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  contact         Contact         @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, contactId, timestamp])
+}
+
+// ----------------------------------------------------
+// 5. Campaigns & Interactive Forms
+// ----------------------------------------------------
+model Campaign {
+  id              String          @id @default(uuid())
+  clientId        String
+  name            String
+  campaignType    String          // "FORM_LEAD", "BROADCAST", "CATALOG", "POLL"
+  messageBody     String
+  interactiveType String?         // "QUICK_REPLY_BUTTONS", "LIST_MENU", "STEP_FORM"
+  interactiveData String?         // JSON configuration of buttons / list options
+  targetTag       String?         // Audience tag or "ALL"
+  status          String          @default("DRAFT") // DRAFT, SCHEDULED, RUNNING, COMPLETED, PAUSED
+  scheduledAt     DateTime?
+  totalSent       Int             @default(0)
+  totalDelivered  Int             @default(0)
+  totalResponded  Int             @default(0)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  client          ClientWorkspace @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  formResponses   FormResponse[]
+}
+
+model FormResponse {
+  id              String          @id @default(uuid())
+  clientId        String
+  campaignId      String?
+  contactId       String
+  answersJson     String          // JSON: { "bhk": "3BHK", "budget": "1.5Cr", "visit": "Sunday" }
+  leadQuality     String          @default("WARM") // HOT, WARM, COLD
+  isSyncedToSheet Boolean         @default(false)
+  syncedAt        DateTime?
+  createdAt       DateTime        @default(now())
+
+  client          ClientWorkspace @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  campaign        Campaign?       @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  contact         Contact         @relation(fields: [contactId], references: [id], onDelete: Cascade)
+}
+
+// ----------------------------------------------------
+// 6. Local Usage Telemetry Buffer
+// ----------------------------------------------------
+model UsageMetricBuffer {
+  id              String   @id @default(uuid())
+  dateHour        String   // "YYYY-MM-DD-HH"
+  messagesCount   Int      @default(0)
+  geminiTokens    Int      @default(0)
+  uniqueUsers     Int      @default(0)
+  isSynced        Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([dateHour])
+}
