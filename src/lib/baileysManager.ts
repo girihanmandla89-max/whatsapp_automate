@@ -71,8 +71,8 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
     auth: state,
     logger,
     printQRInTerminal: false,
-    // WhatsApp's pairing-code handshake strictly requires an official client identifier:
-    browser: Browsers.macOS("Desktop"),
+    // Verified signature that WhatsApp currently accepts without 428/405 drops:
+    browser: ["Windows", "Chrome", "124.0.0.0"],
     syncFullHistory: true,
     generateHighQualityLinkPreview: true,
   });
@@ -103,7 +103,7 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
       } catch (err) {
         console.error(`[Baileys] Failed to generate pairing code for ${cleanPhone}:`, err);
       }
-    }, 2500);
+    }, 3000);
   }
 
   // Handle connection events
@@ -118,11 +118,14 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
         color: { dark: "#00f2fe", light: "#07090e" },
       });
       sessionRecord.status = "QR_READY";
+      console.log(`[Baileys] QR Code DataURL Generated for ${clientId}`);
     }
 
     if (connection === "close") {
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      const isRegistered = sock.authState?.creds?.registered;
+      // Only auto-reconnect if already paired and registered to prevent infinite loops during initial linking
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut && isRegistered;
 
       sessionRecord.status = "DISCONNECTED";
       sessionRecord.qrCodeDataUrl = null;
@@ -137,10 +140,9 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
         console.log(`Connection dropped for client ${clientId} (code: ${statusCode}). Auto-reconnecting in 3s...`);
         setTimeout(() => initializeClientSession(clientId), 3000);
       } else {
-        console.log(`Client ${clientId} was logged out from WhatsApp.`);
+        console.log(`Client ${clientId} disconnected or handshake ended.`);
         activeSessions.delete(clientId);
-        // Purge session files if logged out to allow fresh pairing
-        if (fs.existsSync(sessionDir)) {
+        if (statusCode === DisconnectReason.loggedOut && fs.existsSync(sessionDir)) {
           fs.rmSync(sessionDir, { recursive: true, force: true });
         }
       }
