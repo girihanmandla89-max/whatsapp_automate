@@ -182,11 +182,13 @@ export const DeviceModal: React.FC<DeviceModalProps> = ({ isOpen, onClose, clien
               <div className="space-y-4 text-center">
                 <div className="p-4 bg-slate-950 rounded-xl border border-white/10 flex flex-col items-center justify-center min-h-[220px]">
                   {qrCodeUrl ? (
-                    <img
-                      src={qrCodeUrl}
-                      alt="WhatsApp QR Code"
-                      className="w-48 h-48 rounded-lg shadow-lg border border-cyan-500/30"
-                    />
+                    <div className="p-3 bg-white rounded-2xl shadow-2xl flex items-center justify-center">
+                      <img
+                        src={qrCodeUrl}
+                        alt="WhatsApp QR Code"
+                        className="w-52 h-52 object-contain"
+                      />
+                    </div>
                   ) : (
                     <div className="space-y-3 py-6">
                       <QrCode className="w-12 h-12 text-slate-600 mx-auto animate-pulse" />

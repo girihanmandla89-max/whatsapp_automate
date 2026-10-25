@@ -71,10 +71,13 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
     auth: state,
     logger,
     printQRInTerminal: false,
-    // Verified signature that WhatsApp currently accepts without 428/405 drops:
-    browser: ["Windows", "Chrome", "124.0.0.0"],
+    // Industry Standard configuration used by Evolution API & OpenWA:
+    browser: ["Chrome (Linux)", "", ""],
     syncFullHistory: true,
     generateHighQualityLinkPreview: true,
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
+    keepAliveIntervalMs: 25000,
   });
 
   const sessionRecord: ActiveSession = {
@@ -103,7 +106,7 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
       } catch (err) {
         console.error(`[Baileys] Failed to generate pairing code for ${cleanPhone}:`, err);
       }
-    }, 3000);
+    }, 2000);
   }
 
   // Handle connection events
@@ -112,13 +115,15 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
 
     // Stream QR code as DataURL (only when phone pairing code wasn't requested)
     if (qr && !usePairingCodePhone) {
-      sessionRecord.qrCodeDataUrl = await QRCode.toDataURL(qr, {
+      // Standardize QR string payload: strip URL wrapper if present so both old and new WA scanners read it
+      const qrPayload = qr.includes("#") ? qr.split("#")[1] : qr;
+      sessionRecord.qrCodeDataUrl = await QRCode.toDataURL(qrPayload, {
         margin: 2,
         width: 256,
-        color: { dark: "#00f2fe", light: "#07090e" },
+        color: { dark: "#000000", light: "#ffffff" },
       });
       sessionRecord.status = "QR_READY";
-      console.log(`[Baileys] QR Code DataURL Generated for ${clientId}`);
+      console.log(`[Baileys] Valid QR Code Generated for ${clientId}: ${qrPayload.substring(0, 30)}...`);
     }
 
     if (connection === "close") {
