@@ -73,7 +73,7 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
     printQRInTerminal: false,
     // WhatsApp's pairing-code handshake strictly requires an official client identifier:
     browser: Browsers.macOS("Desktop"),
-    syncFullHistory: false,
+    syncFullHistory: true,
     generateHighQualityLinkPreview: true,
   });
 
@@ -177,15 +177,66 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
   // Persist session credentials
   sock.ev.on("creds.update", saveCreds);
 
-  // Inbound message dispatcher
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
-
+  // Sync historical chats when WhatsApp client sends historical dump
+  sock.ev.on("messaging-history.set", async ({ chats, messages }) => {
+    console.log(`[Baileys] Received chat history: ${chats.length} chats, ${messages.length} messages.`);
     for (const msg of messages) {
-      if (!msg.message || msg.key.fromMe) continue;
+      try {
+        const jid = msg.key.remoteJid;
+        if (!jid || jid.endsWith("@g.us") || jid === "status@broadcast") continue;
+
+        const text =
+          msg.message?.conversation ||
+          msg.message?.extendedTextMessage?.text ||
+          msg.message?.buttonsResponseMessage?.selectedButtonId ||
+          msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+          "";
+
+        if (!text) continue;
+
+        const rawPhone = jid.split("@")[0];
+        const customerPhone = `+${rawPhone}`;
+        const customerName = msg.pushName || `Customer (+${rawPhone.slice(-4)})`;
+        const senderType = msg.key.fromMe ? "HUMAN_AGENT" : "CUSTOMER";
+
+        const contact = await prisma.contact.upsert({
+          where: {
+            clientId_phoneNumber: { clientId, phoneNumber: customerPhone },
+          },
+          update: {
+            name: customerName,
+            lastInteraction: new Date(Number(msg.messageTimestamp || Date.now() / 1000) * 1000),
+          },
+          create: {
+            clientId,
+            phoneNumber: customerPhone,
+            name: customerName,
+            tags: "WHATSAPP_SYNCED",
+          },
+        });
+
+        await prisma.chatMessage.create({
+          data: {
+            clientId,
+            contactId: contact.id,
+            senderType,
+            messageBody: text,
+            timestamp: new Date(Number(msg.messageTimestamp || Date.now() / 1000) * 1000),
+          },
+        });
+      } catch (err) {
+        // Continue processing other messages
+      }
+    }
+  });
+
+  // Inbound real-time message dispatcher
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    for (const msg of messages) {
+      if (!msg.message) continue;
 
       const senderJid = msg.key.remoteJid;
-      if (!senderJid || senderJid.endsWith("@g.us")) continue; // Skip group messages for now
+      if (!senderJid || senderJid.endsWith("@g.us") || senderJid === "status@broadcast") continue;
 
       const text =
         msg.message.conversation ||
@@ -198,37 +249,42 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
 
       const rawPhone = senderJid.split("@")[0];
       const customerPhone = `+${rawPhone}`;
-      const customerName = msg.pushName || "WhatsApp Customer";
+      const customerName = msg.pushName || `Customer (+${rawPhone.slice(-4)})`;
+      const senderType = msg.key.fromMe ? "HUMAN_AGENT" : "CUSTOMER";
 
-      // Save/Find Contact in SQLite
-      const contact = await prisma.contact.upsert({
-        where: {
-          clientId_phoneNumber: {
+      try {
+        // Save/Find Contact in SQLite
+        const contact = await prisma.contact.upsert({
+          where: {
+            clientId_phoneNumber: {
+              clientId,
+              phoneNumber: customerPhone,
+            },
+          },
+          update: {
+            name: customerName,
+            lastInteraction: new Date(),
+          },
+          create: {
             clientId,
             phoneNumber: customerPhone,
+            name: customerName,
+            tags: "WHATSAPP_ACTIVE",
           },
-        },
-        update: {
-          name: customerName,
-          lastInteraction: new Date(),
-        },
-        create: {
-          clientId,
-          phoneNumber: customerPhone,
-          name: customerName,
-          tags: "LEAD",
-        },
-      });
+        });
 
-      // Save Inbound Message in SQLite
-      await prisma.chatMessage.create({
-        data: {
-          clientId,
-          contactId: contact.id,
-          senderType: "CUSTOMER",
-          messageBody: text,
-        },
-      });
+        // Save Inbound Message in SQLite
+        await prisma.chatMessage.create({
+          data: {
+            clientId,
+            contactId: contact.id,
+            senderType,
+            messageBody: text,
+          },
+        });
+      } catch (err) {
+        console.error("Error storing upsert message:", err);
+      }
     }
   });
 
