@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   UploadCloud,
   FileSpreadsheet,
@@ -55,36 +55,51 @@ export default function ContactsPage() {
   const [autoTagFirstMessage, setAutoTagFirstMessage] = useState("INBOUND_FIRST_CONTACT");
   const [savedWhatsAppRule, setSavedWhatsAppRule] = useState(false);
 
-  // Existing Contacts State
-  const [contacts, setContacts] = useState([
-    {
-      id: "1",
-      name: "Rahul Sharma",
-      phone: "+91 98450 11223",
-      tags: "VIP, 3BHK_VILLA",
-      leadScore: "HOT",
-      date: "Today, 10:30 AM",
-      source: "Bulk Import",
-    },
-    {
-      id: "2",
-      name: "Priya Patel",
-      phone: "+91 98123 44556",
-      tags: "CLINIC_PATIENT",
-      leadScore: "WARM",
-      date: "Yesterday",
-      source: "Google Sheet Sync",
-    },
-    {
-      id: "3",
-      name: "Arun Mehta",
-      phone: "+91 97400 99887",
-      tags: "RETAIL_SUMMER",
-      leadScore: "COLD",
-      date: "2 days ago",
-      source: "WhatsApp Inbound",
-    },
-  ]);
+  // Existing Contacts State with live hydration
+  const [contacts, setContacts] = useState<Array<{
+    id: string;
+    name: string;
+    phone: string;
+    tags: string;
+    leadScore: string;
+    date: string;
+    source: string;
+  }>>([]);
+  const [isLoadingContacts, setIsLoadingContacts] = useState(false);
+
+  // Fetch real contacts from SQLite
+  const fetchContacts = async () => {
+    try {
+      setIsLoadingContacts(true);
+      const res = await fetch("/api/contacts?clientId=default-client-1");
+      const data = await res.json();
+      if (data.contacts && Array.isArray(data.contacts)) {
+        const mapped = data.contacts.map((c: any) => ({
+          id: c.id,
+          name: c.name || "Unknown Customer",
+          phone: c.phoneNumber,
+          tags: c.tags || "DIRECT_SYNC",
+          leadScore: c.leadScore || "WARM",
+          date: new Date(c.createdAt || c.lastInteraction || Date.now()).toLocaleDateString([], {
+            month: "short",
+            day: "numeric",
+          }),
+          source: c.tags?.includes("WHATSAPP") ? "WhatsApp Live Sync" : "Directory",
+        }));
+        setContacts(mapped);
+      }
+    } catch (e) {
+      console.error("Error loading real contacts from SQLite:", e);
+    } finally {
+      setIsLoadingContacts(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchContacts();
+    const interval = setInterval(fetchContacts, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   // High-performance memoized search filtering across name, phone, tags, and source
   const filteredContacts = useMemo(() => {

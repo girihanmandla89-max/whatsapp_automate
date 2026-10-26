@@ -12,8 +12,9 @@ import QRCode from "qrcode";
 import path from "path";
 import fs from "fs";
 import { prisma } from "./prisma";
+import { generateGeminiReply } from "./geminiAgent";
 
-// In-memory socket registry for multi-tenant clients
+// In-memory socket registry for multi-tenant clients (global singleton to survive Next.js Turbopack reloads)
 interface ActiveSession {
   clientId: string;
   socket: WASocket;
@@ -29,7 +30,16 @@ interface ActiveSession {
   };
 }
 
-const activeSessions: Map<string, ActiveSession> = new Map();
+const globalForSessions = globalThis as unknown as {
+  whatsappSessions: Map<string, ActiveSession> | undefined;
+};
+
+const activeSessions: Map<string, ActiveSession> =
+  globalForSessions.whatsappSessions ?? new Map();
+
+if (process.env.NODE_ENV !== "production") {
+  globalForSessions.whatsappSessions = activeSessions;
+}
 
 /**
  * Initializes an isolated Baileys WhatsApp session for a specific Client Workspace.
@@ -187,54 +197,125 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
   // Sync historical chats when WhatsApp client sends historical dump
   sock.ev.on("messaging-history.set", async ({ chats, messages }) => {
     console.log(`[Baileys] Received chat history: ${chats.length} chats, ${messages.length} messages.`);
+    
+    // Step 1: Pre-filter valid 1-to-1 WhatsApp messages and extract payload text
+    interface ParsedSyncMessage {
+      jid: string;
+      customerPhone: string;
+      customerName: string;
+      text: string;
+      senderType: "HUMAN_AGENT" | "CUSTOMER";
+      timestamp: Date;
+    }
+
+    const validMessages: ParsedSyncMessage[] = [];
+    const contactMap = new Map<string, { phone: string; name: string; lastSeen: Date }>();
+
     for (const msg of messages) {
+      const jid = msg.key.remoteJid;
+      // Strictly accept 1-to-1 contacts (@s.whatsapp.net or @lid) and discard broadcast/groups/newsletters
+      if (!jid || jid.endsWith("@g.us") || jid === "status@broadcast" || jid.endsWith("@newsletter")) {
+        continue;
+      }
+
+      const text =
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        msg.message?.imageMessage?.caption ||
+        msg.message?.videoMessage?.caption ||
+        msg.message?.documentMessage?.caption ||
+        msg.message?.buttonsResponseMessage?.selectedButtonId ||
+        msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+        msg.message?.templateButtonReplyMessage?.selectedId ||
+        "";
+
+      if (!text || !text.trim()) continue;
+
+      const rawPhone = jid.split("@")[0].split(":")[0].replace(/\D/g, "");
+      if (!rawPhone || rawPhone.length < 6) continue;
+
+      const customerPhone = `+${rawPhone}`;
+      const customerName = msg.pushName || `Customer (+${rawPhone.slice(-4)})`;
+      const senderType = msg.key.fromMe ? "HUMAN_AGENT" : "CUSTOMER";
+      const timestamp = new Date(Number(msg.messageTimestamp || Date.now() / 1000) * 1000);
+
+      validMessages.push({
+        jid,
+        customerPhone,
+        customerName,
+        text: text.trim(),
+        senderType,
+        timestamp,
+      });
+
+      // Update latest contact timestamp in memory
+      const existing = contactMap.get(customerPhone);
+      if (!existing || timestamp > existing.lastSeen) {
+        contactMap.set(customerPhone, {
+          phone: customerPhone,
+          name: customerName,
+          lastSeen: timestamp,
+        });
+      }
+    }
+
+    console.log(`[Baileys] Processed ${validMessages.length} valid 1-to-1 messages across ${contactMap.size} unique contacts.`);
+
+    // Step 2: Ingest contacts in an async background queue to prevent blocking the socket keep-alive
+    const contactIdMap = new Map<string, string>();
+    for (const [phone, info] of contactMap.entries()) {
       try {
-        const jid = msg.key.remoteJid;
-        if (!jid || jid.endsWith("@g.us") || jid === "status@broadcast") continue;
-
-        const text =
-          msg.message?.conversation ||
-          msg.message?.extendedTextMessage?.text ||
-          msg.message?.buttonsResponseMessage?.selectedButtonId ||
-          msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
-          "";
-
-        if (!text) continue;
-
-        const rawPhone = jid.split("@")[0];
-        const customerPhone = `+${rawPhone}`;
-        const customerName = msg.pushName || `Customer (+${rawPhone.slice(-4)})`;
-        const senderType = msg.key.fromMe ? "HUMAN_AGENT" : "CUSTOMER";
-
         const contact = await prisma.contact.upsert({
-          where: {
-            clientId_phoneNumber: { clientId, phoneNumber: customerPhone },
-          },
+          where: { clientId_phoneNumber: { clientId, phoneNumber: phone } },
           update: {
-            name: customerName,
-            lastInteraction: new Date(Number(msg.messageTimestamp || Date.now() / 1000) * 1000),
+            name: info.name,
+            lastInteraction: info.lastSeen,
           },
           create: {
             clientId,
-            phoneNumber: customerPhone,
-            name: customerName,
+            phoneNumber: phone,
+            name: info.name,
             tags: "WHATSAPP_SYNCED",
+            lastInteraction: info.lastSeen,
           },
         });
-
-        await prisma.chatMessage.create({
-          data: {
-            clientId,
-            contactId: contact.id,
-            senderType,
-            messageBody: text,
-            timestamp: new Date(Number(msg.messageTimestamp || Date.now() / 1000) * 1000),
-          },
-        });
-      } catch (err) {
-        // Continue processing other messages
+        contactIdMap.set(phone, contact.id);
+      } catch (cErr) {
+        // Continue processing other contacts
       }
     }
+
+    // Step 3: Insert messages in non-blocking chunks of 50 to prevent SQLite locks & event loop starvation
+    const CHUNK_SIZE = 50;
+    for (let i = 0; i < validMessages.length; i += CHUNK_SIZE) {
+      const chunk = validMessages.slice(i, i + CHUNK_SIZE);
+      await new Promise<void>((resolve) => {
+        setImmediate(async () => {
+          try {
+            await prisma.$transaction(
+              chunk
+                .filter((m) => contactIdMap.has(m.customerPhone))
+                .map((m) =>
+                  prisma.chatMessage.create({
+                    data: {
+                      clientId,
+                      contactId: contactIdMap.get(m.customerPhone)!,
+                      senderType: m.senderType,
+                      messageBody: m.text,
+                      timestamp: m.timestamp,
+                    },
+                  })
+                )
+            );
+          } catch (tErr) {
+            // Non-fatal chunk error
+          }
+          resolve();
+        });
+      });
+    }
+
+    console.log(`[Baileys] Historical chat ingestion completed for client ${clientId}.`);
   });
 
   // Inbound real-time message dispatcher
@@ -243,18 +324,25 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
       if (!msg.message) continue;
 
       const senderJid = msg.key.remoteJid;
-      if (!senderJid || senderJid.endsWith("@g.us") || senderJid === "status@broadcast") continue;
+      if (!senderJid || senderJid.endsWith("@g.us") || senderJid === "status@broadcast" || senderJid.endsWith("@newsletter")) continue;
 
+      // Extract text from all potential WhatsApp message formats:
       const text =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
+        msg.message.imageMessage?.caption ||
+        msg.message.videoMessage?.caption ||
+        msg.message.documentMessage?.caption ||
         msg.message.buttonsResponseMessage?.selectedButtonId ||
         msg.message.listResponseMessage?.singleSelectReply?.selectedRowId ||
+        msg.message.templateButtonReplyMessage?.selectedId ||
         "";
 
-      if (!text) continue;
+      if (!text || !text.trim()) continue;
 
-      const rawPhone = senderJid.split("@")[0];
+      const rawPhone = senderJid.split("@")[0].split(":")[0].replace(/\D/g, "");
+      if (!rawPhone || rawPhone.length < 6) continue;
+
       const customerPhone = `+${rawPhone}`;
       const customerName = msg.pushName || `Customer (+${rawPhone.slice(-4)})`;
       const senderType = msg.key.fromMe ? "HUMAN_AGENT" : "CUSTOMER";
@@ -287,8 +375,49 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
             contactId: contact.id,
             senderType,
             messageBody: text,
+            isHumanTakeover: contact.isUnsubscribed || false,
           },
         });
+
+        // If the customer sent the message and human takeover is NOT active, trigger Gemini AI
+        if (!msg.key.fromMe) {
+          // Check if latest message in thread is Human Takeover
+          const lastHumanMsg = await prisma.chatMessage.findFirst({
+            where: { contactId: contact.id, isHumanTakeover: true },
+            orderBy: { timestamp: "desc" },
+          });
+
+          const isTakeoverActive = !!lastHumanMsg?.isHumanTakeover;
+
+          if (!isTakeoverActive) {
+            // Asynchronously generate AI response
+            setTimeout(async () => {
+              try {
+                const aiResult = await generateGeminiReply(clientId, contact.id, text);
+                if (aiResult?.replyText) {
+                  // Save AI message to DB
+                  await prisma.chatMessage.create({
+                    data: {
+                      clientId,
+                      contactId: contact.id,
+                      senderType: "AI_AGENT",
+                      messageBody: aiResult.replyText,
+                      isHumanTakeover: aiResult.isEscalated,
+                    },
+                  });
+
+                  // Dispatch outbound WhatsApp message to the customer
+                  await sendHumanizedMessage(clientId, senderJid, aiResult.replyText);
+                  console.log(`[Baileys] Dispatched AI reply to ${customerPhone}: "${aiResult.replyText.substring(0, 40)}..."`);
+                }
+              } catch (aiErr) {
+                console.error(`[Baileys] Error processing AI reply for ${customerPhone}:`, aiErr);
+              }
+            }, 1000);
+          } else {
+            console.log(`[Baileys] Skipping AI reply for ${customerPhone} (Human Takeover is active).`);
+          }
+        }
       } catch (err) {
         console.error("Error storing upsert message:", err);
       }

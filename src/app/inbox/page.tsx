@@ -54,9 +54,12 @@ export default function LiveInboxPage() {
           tags: c.tags || "LEAD",
         }));
         setContacts(formatted);
-        if (!selectedContact) {
-          setSelectedContact(formatted[0]);
-        }
+        setSelectedContact((prev) => {
+          if (!prev) return formatted[0];
+          // Preserve currently selected contact with updated metadata
+          const matched = formatted.find((item) => item.id === prev.id);
+          return matched || prev;
+        });
       }
     } catch (e) {
       console.error("Error fetching inbox contacts:", e);
@@ -134,6 +137,14 @@ export default function LiveInboxPage() {
 
     const textToSend = replyInput;
     setReplyInput("");
+
+    // Optimistic UI update: instantly append human message bubble
+    const nowTime = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    setMessages((prev) => [
+      ...prev,
+      { sender: "human", text: textToSend, time: nowTime },
+    ]);
+
     setIsLoading(true);
 
     try {
