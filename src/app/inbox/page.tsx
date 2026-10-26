@@ -40,11 +40,36 @@ export default function LiveInboxPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState<"ALL" | "HOT" | "TAKEOVER">("ALL");
+  const [aiDraft, setAiDraft] = useState<string | null>(null);
+  const [isGeneratingDraft, setIsGeneratingDraft] = useState(false);
 
   // Drafts cache per contact so switching conversations preserves typed text
   const draftsRef = useRef<{ [contactId: string]: string }>({});
   // Scroll anchor ref for smooth, non-intrusive auto-scrolling
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const handleSuggestDraft = async () => {
+    if (!selectedContact) return;
+    setIsGeneratingDraft(true);
+    try {
+      const res = await fetch("/api/inbox", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "suggest_draft",
+          contactId: selectedContact.id,
+        }),
+      });
+      const data = await res.json();
+      if (data.draft) {
+        setAiDraft(data.draft);
+      }
+    } catch (e) {
+      console.error("Error generating draft:", e);
+    } finally {
+      setIsGeneratingDraft(false);
+    }
+  };
 
   // 1. Fetch live WhatsApp contacts
   const fetchLiveInbox = async () => {
@@ -140,6 +165,7 @@ export default function LiveInboxPage() {
       // Save draft before switching
       draftsRef.current[selectedContact.id] = replyInput;
     }
+    setAiDraft(null);
     setSelectedContact(contact);
   };
 
@@ -187,6 +213,32 @@ export default function LiveInboxPage() {
       });
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const handlePromoteToLead = async () => {
+    if (!selectedContact) return;
+    try {
+      const res = await fetch("/api/contacts", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: selectedContact.id,
+          tags: "LEAD, WHATSAPP_ACTIVE",
+          leadScore: "HOT",
+        }),
+      });
+      if (res.ok) {
+        const updated = {
+          ...selectedContact,
+          tags: "LEAD, WHATSAPP_ACTIVE",
+          leadScore: "HOT" as const,
+        };
+        setSelectedContact(updated);
+        setContacts((prev) => prev.map((c) => (c.id === selectedContact.id ? updated : c)));
+      }
+    } catch (e) {
+      console.error("Error promoting to lead:", e);
     }
   };
 
@@ -369,13 +421,48 @@ export default function LiveInboxPage() {
                     </div>
                   </div>
                   <div>
-                    <h3 className="text-xs font-bold text-white">{selectedContact.name}</h3>
-                    <p className="text-[11px] font-mono text-cyan-400">{selectedContact.phone}</p>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-xs font-bold text-white">{selectedContact.name}</h3>
+                      <span className="text-[10px] font-mono text-cyan-400">({selectedContact.phone})</span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      {selectedContact.isHumanTakeover ? (
+                        <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                          <UserCheck className="w-2.5 h-2.5" /> Human Takeover
+                        </span>
+                      ) : (selectedContact.tags || "").toUpperCase().includes("LEAD") ||
+                        (selectedContact.tags || "").toUpperCase().includes("CAMPAIGN") ||
+                        (selectedContact.tags || "").toUpperCase().includes("INBOUND") ||
+                        (selectedContact.tags || "").toUpperCase().includes("VIP") ? (
+                        <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-violet-500/10 text-violet-300 border border-violet-500/30 flex items-center gap-1">
+                          <Bot className="w-2.5 h-2.5" /> AI Active (Guarded)
+                        </span>
+                      ) : (
+                        <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-slate-500/10 text-slate-400 border border-slate-500/30 flex items-center gap-1">
+                          <AlertTriangle className="w-2.5 h-2.5 text-slate-400" /> Historical / Muted
+                        </span>
+                      )}
+                      <span className="text-[9px] font-mono text-slate-500">Tags: {selectedContact.tags || "None"}</span>
+                    </div>
                   </div>
                 </div>
 
-                {/* 1-Click Human Takeover Toggle */}
-                <div className="flex items-center gap-3">
+                {/* Header Action Buttons */}
+                <div className="flex items-center gap-2">
+                  {!((selectedContact.tags || "").toUpperCase().includes("LEAD") ||
+                    (selectedContact.tags || "").toUpperCase().includes("CAMPAIGN") ||
+                    (selectedContact.tags || "").toUpperCase().includes("INBOUND") ||
+                    (selectedContact.tags || "").toUpperCase().includes("VIP")) && (
+                    <button
+                      onClick={handlePromoteToLead}
+                      className="px-2.5 py-1.5 rounded-xl text-[11px] font-mono bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 cursor-pointer transition-all flex items-center gap-1"
+                      title="Promote this contact to LEAD to enable AI auto-replies"
+                    >
+                      <Sparkles className="w-3 h-3 text-emerald-400" />
+                      Promote to Lead
+                    </button>
+                  )}
+
                   <button
                     onClick={toggleTakeover}
                     className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all border cursor-pointer ${
@@ -387,12 +474,12 @@ export default function LiveInboxPage() {
                     {selectedContact.isHumanTakeover ? (
                       <>
                         <UserCheck className="w-3.5 h-3.5" />
-                        Human Takeover (AI Paused) — Click to Resume AI
+                        Takeover Active (AI Paused)
                       </>
                     ) : (
                       <>
                         <Bot className="w-3.5 h-3.5" />
-                        AI Handling — Click to Take Over
+                        Take Over
                       </>
                     )}
                   </button>
@@ -447,6 +534,41 @@ export default function LiveInboxPage() {
                 <div ref={messagesEndRef} />
               </div>
 
+              {/* Shadow AI Draft Suggestion Box */}
+              {aiDraft && (
+                <div className="mx-3 my-2 p-3 rounded-xl bg-cyan-950/40 border border-cyan-500/30 flex items-start justify-between gap-3 animate-in fade-in slide-in-from-bottom-2">
+                  <div className="flex items-start gap-2.5">
+                    <Sparkles className="w-4 h-4 text-cyan-400 mt-0.5 shrink-0 animate-pulse" />
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-mono font-bold text-cyan-400 uppercase tracking-wider">AI Suggested Draft (Shadow Assist)</span>
+                        <span className="text-[9px] px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 font-mono">Gemini 2.5 Flash</span>
+                      </div>
+                      <p className="text-xs text-slate-200 leading-relaxed italic">"{aiDraft}"</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setReplyInput(aiDraft);
+                        setAiDraft(null);
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 text-[11px] font-semibold border border-cyan-500/40 cursor-pointer transition-all"
+                    >
+                      Insert Draft
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAiDraft(null)}
+                      className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white text-[11px] cursor-pointer transition-all"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Reply Bar */}
               <form onSubmit={handleSendReply} className="p-3 border-t border-white/5 bg-black/30 flex gap-2">
                 <input
@@ -454,12 +576,22 @@ export default function LiveInboxPage() {
                   placeholder={
                     selectedContact.isHumanTakeover
                       ? "Type manual message to WhatsApp customer..."
-                      : "Type to reply manually (auto-takes over from AI)..."
+                      : "Type manual reply or click 'Suggest AI Draft'..."
                   }
                   value={replyInput}
                   onChange={handleReplyInputChange}
                   className="flex-1 px-4 py-2.5 rounded-xl bg-black/40 border border-white/10 text-white text-xs focus:border-cyan-500/50 outline-none font-sans"
                 />
+                <button
+                  type="button"
+                  onClick={handleSuggestDraft}
+                  disabled={isGeneratingDraft}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-violet-500/10 hover:bg-violet-500/20 border border-violet-500/30 text-violet-300 text-xs font-medium cursor-pointer transition-all disabled:opacity-50"
+                  title="Generate contextual AI suggestion without sending"
+                >
+                  <Sparkles className={`w-3.5 h-3.5 text-violet-400 ${isGeneratingDraft ? "animate-spin" : ""}`} />
+                  <span className="hidden sm:inline">{isGeneratingDraft ? "Thinking..." : "Suggest AI Draft"}</span>
+                </button>
                 <CyberButton
                   type="submit"
                   variant="primary"

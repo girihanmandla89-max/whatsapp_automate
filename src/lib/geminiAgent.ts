@@ -177,3 +177,18 @@ Assistant:`;
     };
   }
 }
+
+/**
+ * Generates an AI suggested reply draft based on the latest context of a conversation.
+ * Designed for Live Inbox operators in Shadow Assist mode.
+ */
+export async function generateShadowDraft(clientId: string, contactId: string): Promise<string> {
+  const lastCustomerMsg = await prisma.chatMessage.findFirst({
+    where: { clientId, contactId, senderType: "CUSTOMER" },
+    orderBy: { timestamp: "desc" },
+  });
+
+  const queryText = lastCustomerMsg?.messageBody || "Hello, I am inquiring about your available services.";
+  const result = await generateGeminiReply(clientId, contactId, queryText);
+  return result.replyText;
+}

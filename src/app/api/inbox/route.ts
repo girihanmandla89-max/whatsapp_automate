@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { sendHumanizedMessage } from "@/lib/baileysManager";
+import { generateShadowDraft } from "@/lib/geminiAgent";
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -87,6 +88,17 @@ export async function POST(req: Request) {
         orderBy: { timestamp: "asc" },
       });
       return NextResponse.json({ messages });
+    }
+
+    // Action 4: Generate contextual AI suggested reply draft (Shadow Assist Mode)
+    if (body.action === "suggest_draft") {
+      const contact = await prisma.contact.findUnique({
+        where: { id: body.contactId },
+      });
+      if (!contact) return NextResponse.json({ error: "Contact not found" }, { status: 404 });
+
+      const draft = await generateShadowDraft(contact.clientId, contact.id);
+      return NextResponse.json({ success: true, draft });
     }
 
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });

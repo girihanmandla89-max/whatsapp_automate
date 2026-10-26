@@ -54,10 +54,68 @@ function cleanupExistingSocket(session?: ActiveSession) {
     session.socket.ev.removeAllListeners("connection.update");
     session.socket.ev.removeAllListeners("creds.update");
     session.socket.ev.removeAllListeners("messaging-history.set");
+    session.socket.ev.removeAllListeners("contacts.upsert");
+    session.socket.ev.removeAllListeners("contacts.update");
+    session.socket.ev.removeAllListeners("chats.upsert");
+    session.socket.ev.removeAllListeners("chats.update");
     session.socket.ev.removeAllListeners("messages.upsert");
     session.socket.end(undefined);
   } catch (err) {
     // Gracefully handle socket already closed
+  }
+}
+
+/**
+ * Ingests address book contacts from WhatsApp with Contact Identity Resolution:
+ * Phonebook Name > Verified Name > PushName (notify) > Fallback Mask (+XXXX)
+ * Also upgrades existing contacts if their saved name was generic ("Customer (+XXXX)").
+ */
+async function ingestAddressBookContacts(clientId: string, rawContacts: any[]) {
+  if (!rawContacts || !Array.isArray(rawContacts) || rawContacts.length === 0) return;
+
+  for (const c of rawContacts) {
+    const jid = c.id;
+    if (!jid || jid.endsWith("@g.us") || jid === "status@broadcast" || jid.endsWith("@newsletter")) {
+      continue;
+    }
+    const rawPhone = jid.split("@")[0].split(":")[0].replace(/\D/g, "");
+    if (!rawPhone || rawPhone.length < 6) continue;
+    const phone = `+${rawPhone}`;
+
+    // Contact Identity Resolution Hierarchy
+    const resolvedName = c.name || c.verifiedName || c.notify || `Customer (+${rawPhone.slice(-4)})`;
+
+    try {
+      const existing = await prisma.contact.findUnique({
+        where: { clientId_phoneNumber: { clientId, phoneNumber: phone } },
+      });
+
+      if (existing) {
+        // Upgrade generic name if actual phonebook or pushname is provided
+        const isGeneric = !existing.name || existing.name.startsWith("Customer (+");
+        if (isGeneric && (c.name || c.verifiedName || c.notify)) {
+          await prisma.contact.update({
+            where: { id: existing.id },
+            data: { name: resolvedName },
+          });
+        }
+      } else {
+        // Create new historical contact safely in quarantine tier (WHATSAPP_SYNCED)
+        await prisma.contact.create({
+          data: {
+            clientId,
+            phoneNumber: phone,
+            name: resolvedName,
+            tags: "WHATSAPP_SYNCED",
+            leadScore: "WARM",
+            isUnsubscribed: false,
+            lastInteraction: new Date(),
+          },
+        });
+      }
+    } catch (e) {
+      // Non-fatal concurrency or duplicate
+    }
   }
 }
 
@@ -263,9 +321,46 @@ export async function initializeClientSession(
   // Persist session credentials
   sock.ev.on("creds.update", saveCreds);
 
+  // Address Book Incremental Updates / Upserts
+  sock.ev.on("contacts.upsert", async (contacts) => {
+    console.log(`[Baileys] Received ${contacts.length} upserted address book contacts for client ${clientId}.`);
+    await ingestAddressBookContacts(clientId, contacts);
+  });
+
+  // Real-time Address Book modifications
+  sock.ev.on("contacts.update", async (updates) => {
+    for (const update of updates) {
+      if (!update.id) continue;
+      const rawPhone = update.id.split("@")[0].split(":")[0].replace(/\D/g, "");
+      if (!rawPhone || rawPhone.length < 6) continue;
+      const phone = `+${rawPhone}`;
+      const newName = (update as any).name || (update as any).verifiedName || (update as any).notify;
+      if (newName) {
+        try {
+          await prisma.contact.updateMany({
+            where: { clientId, phoneNumber: phone },
+            data: { name: newName },
+          });
+        } catch (e) {}
+      }
+    }
+  });
+
+  // Conversation Threads & Unread Counts Sync
+  sock.ev.on("chats.upsert", async (chats) => {
+    console.log(`[Baileys] Received ${chats.length} upserted chat threads.`);
+  });
+
+  sock.ev.on("chats.update", async (updates) => {
+    console.log(`[Baileys] Received ${updates.length} chat thread updates.`);
+  });
+
   // Sync historical chats when WhatsApp client sends historical dump
-  sock.ev.on("messaging-history.set", async ({ chats, messages }) => {
-    console.log(`[Baileys] Received chat history: ${chats.length} chats, ${messages.length} messages.`);
+  sock.ev.on("messaging-history.set", async ({ chats, contacts, messages }: any) => {
+    console.log(`[Baileys] Received chat history: ${chats?.length || 0} chats, ${contacts?.length || 0} contacts, ${messages?.length || 0} messages.`);
+    if (contacts && contacts.length > 0) {
+      await ingestAddressBookContacts(clientId, contacts);
+    }
     
     // Step 1: Pre-filter valid 1-to-1 WhatsApp messages and extract payload text
     interface ParsedSyncMessage {
@@ -448,44 +543,78 @@ export async function initializeClientSession(
           },
         });
 
-        // If the customer sent the message and human takeover is NOT active, trigger Gemini AI
+        // =====================================================================
+        // AI POLICY GATEKEEPER: Determines whether the AI should communicate
+        // =====================================================================
         if (!msg.key.fromMe) {
-          // Check if latest message in thread is Human Takeover
+          // Rule 1: Check if contact is unsubscribed or opted out
+          if (contact.isUnsubscribed) {
+            console.log(`[AI Gatekeeper] Blocked AI for ${customerPhone} (Contact is Unsubscribed/Opted-out).`);
+            continue;
+          }
+
+          // Rule 2: Check if Human Agent has actively taken over this conversation
           const lastHumanMsg = await prisma.chatMessage.findFirst({
             where: { contactId: contact.id, isHumanTakeover: true },
             orderBy: { timestamp: "desc" },
           });
 
           const isTakeoverActive = !!lastHumanMsg?.isHumanTakeover;
-
-          if (!isTakeoverActive) {
-            // Asynchronously generate AI response
-            setTimeout(async () => {
-              try {
-                const aiResult = await generateGeminiReply(clientId, contact.id, text);
-                if (aiResult?.replyText) {
-                  // Save AI message to DB
-                  await prisma.chatMessage.create({
-                    data: {
-                      clientId,
-                      contactId: contact.id,
-                      senderType: "AI_AGENT",
-                      messageBody: aiResult.replyText,
-                      isHumanTakeover: aiResult.isEscalated,
-                    },
-                  });
-
-                  // Dispatch outbound WhatsApp message to the customer
-                  await sendHumanizedMessage(clientId, senderJid, aiResult.replyText);
-                  console.log(`[Baileys] Dispatched AI reply to ${customerPhone}: "${aiResult.replyText.substring(0, 40)}..."`);
-                }
-              } catch (aiErr) {
-                console.error(`[Baileys] Error processing AI reply for ${customerPhone}:`, aiErr);
-              }
-            }, 1000);
-          } else {
-            console.log(`[Baileys] Skipping AI reply for ${customerPhone} (Human Takeover is active).`);
+          if (isTakeoverActive) {
+            console.log(`[AI Gatekeeper] Skipping AI for ${customerPhone} (Human Takeover is active).`);
+            continue;
           }
+
+          // Rule 3: Audience Tag Governance (Whitelist Check)
+          // AI responds to business leads and new inbound contacts, while bypassing personal/internal chats
+          const contactTags = (contact.tags || "").toUpperCase();
+          const isWhitelistedAudience =
+            contactTags.includes("LEAD") ||
+            contactTags.includes("CAMPAIGN") ||
+            contactTags.includes("INBOUND") ||
+            contactTags.includes("VIP") ||
+            contactTags.includes("NEW_CONTACT");
+
+          if (!isWhitelistedAudience) {
+            console.log(`[AI Gatekeeper] Skipping AI for ${customerPhone} (Tags "${contact.tags}" not in AI Audience Whitelist). Routing to Human Inbox.`);
+            continue;
+          }
+
+          // Rule 4: Anti-Spam Rate Limit Cooldown (Minimum 8s between automated AI replies to the same number)
+          const lastAiMsg = await prisma.chatMessage.findFirst({
+            where: { contactId: contact.id, senderType: "AI_AGENT" },
+            orderBy: { timestamp: "desc" },
+          });
+
+          if (lastAiMsg && Date.now() - new Date(lastAiMsg.timestamp).getTime() < 8000) {
+            console.log(`[AI Gatekeeper] Cooldown active for ${customerPhone} (< 8s since last AI response).`);
+            continue;
+          }
+
+          // All Gatekeeper checks passed: Asynchronously generate Gemini AI response
+          setTimeout(async () => {
+            try {
+              const aiResult = await generateGeminiReply(clientId, contact.id, text);
+              if (aiResult?.replyText) {
+                // Save AI message to DB
+                await prisma.chatMessage.create({
+                  data: {
+                    clientId,
+                    contactId: contact.id,
+                    senderType: "AI_AGENT",
+                    messageBody: aiResult.replyText,
+                    isHumanTakeover: aiResult.isEscalated,
+                  },
+                });
+
+                // Dispatch outbound WhatsApp message to the customer
+                await sendHumanizedMessage(clientId, senderJid, aiResult.replyText);
+                console.log(`[Baileys] Dispatched AI reply to ${customerPhone}: "${aiResult.replyText.substring(0, 40)}..."`);
+              }
+            } catch (aiErr) {
+              console.error(`[Baileys] Error processing AI reply for ${customerPhone}:`, aiErr);
+            }
+          }, 1000);
         }
       } catch (err) {
         console.error("Error storing upsert message:", err);
@@ -508,9 +637,9 @@ export async function sendHumanizedMessage(clientId: string, targetJid: string, 
   // 1. Simulate Read Receipt
   await session.socket.readMessages([{ remoteJid: targetJid, id: undefined }]);
 
-  // 2. Simulate Typing indicator for 2 to 4 seconds
+  // 2. Simulate Typing indicator proportional to message length
   await session.socket.sendPresenceUpdate("composing", targetJid);
-  const typingDelayMs = Math.floor(Math.random() * 2000) + 2000;
+  const typingDelayMs = Math.min(Math.max(messageText.length * 35, 1800), 4500);
   await new Promise((res) => setTimeout(res, typingDelayMs));
 
   // 3. Pause typing indicator
