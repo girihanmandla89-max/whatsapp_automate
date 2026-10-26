@@ -21,6 +21,9 @@ import {
   HelpCircle,
   X,
   MessageSquare,
+  Edit2,
+  Trash2,
+  Check,
 } from "lucide-react";
 import { CyberButton } from "@/components/ui/CyberButton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -68,6 +71,16 @@ export default function ContactsPage() {
   }>>([]);
   const [isLoadingContacts, setIsLoadingContacts] = useState(false);
 
+  // In-place Quick Edit Modal State
+  const [editingContact, setEditingContact] = useState<{
+    id: string;
+    name: string;
+    phone: string;
+    tags: string;
+    leadScore: string;
+  } | null>(null);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+
   // Fetch real contacts from SQLite
   const fetchContacts = async () => {
     try {
@@ -101,6 +114,60 @@ export default function ContactsPage() {
     const interval = setInterval(fetchContacts, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  const handleSaveContact = async () => {
+    if (!editingContact) return;
+    setIsSavingEdit(true);
+    try {
+      const res = await fetch("/api/contacts", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contactId: editingContact.id,
+          name: editingContact.name,
+          tags: editingContact.tags,
+          leadScore: editingContact.leadScore,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setContacts((prev) =>
+          prev.map((c) =>
+            c.id === editingContact.id
+              ? {
+                  ...c,
+                  name: editingContact.name,
+                  tags: editingContact.tags,
+                  leadScore: editingContact.leadScore,
+                }
+              : c
+          )
+        );
+        setEditingContact(null);
+      }
+    } catch (e) {
+      console.error("Error updating contact:", e);
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+
+  const handleDeleteContact = async (contactId: string) => {
+    if (!confirm("Are you sure you want to delete this contact and their conversation history?")) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/contacts?contactId=${contactId}`, {
+        method: "DELETE",
+      });
+      const data = await res.json();
+      if (data.success) {
+        setContacts((prev) => prev.filter((c) => c.id !== contactId));
+      }
+    } catch (e) {
+      console.error("Error deleting contact:", e);
+    }
+  };
 
   // High-performance memoized search filtering across name, phone, tags, and source
   const filteredContacts = useMemo(() => {
@@ -596,8 +663,8 @@ export default function ContactsPage() {
                     <p className="text-[11px] font-mono text-cyan-400">{c.phone}</p>
                   </div>
 
-                  <div className="flex items-center gap-3">
-                    <div className="text-right space-y-1">
+                  <div className="flex items-center gap-2">
+                    <div className="text-right space-y-1 mr-1">
                       <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-violet-500/10 text-violet-300 border border-violet-500/20 block truncate max-w-[140px]">
                         {c.tags}
                       </span>
@@ -608,6 +675,7 @@ export default function ContactsPage() {
                       </div>
                     </div>
 
+                    {/* 1-Click Live Chat Bridge */}
                     <a
                       href={`/inbox?contactId=${c.id}`}
                       className="p-2 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-400 transition-all flex items-center justify-center cursor-pointer shadow-sm"
@@ -615,6 +683,32 @@ export default function ContactsPage() {
                     >
                       <MessageSquare className="w-3.5 h-3.5" />
                     </a>
+
+                    {/* Edit Contact Button */}
+                    <button
+                      onClick={() =>
+                        setEditingContact({
+                          id: c.id,
+                          name: c.name,
+                          phone: c.phone,
+                          tags: c.tags,
+                          leadScore: c.leadScore,
+                        })
+                      }
+                      className="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 hover:text-white transition-all flex items-center justify-center cursor-pointer shadow-sm"
+                      title="Edit Contact"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+
+                    {/* Delete Contact Button */}
+                    <button
+                      onClick={() => handleDeleteContact(c.id)}
+                      className="p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 transition-all flex items-center justify-center cursor-pointer shadow-sm"
+                      title="Delete Contact"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 </div>
               ))
@@ -650,6 +744,103 @@ export default function ContactsPage() {
           </div>
         </div>
       </div>
+
+      {/* In-Place Contact Quick-Edit Modal */}
+      {editingContact && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="glass-panel-glow max-w-md w-full p-6 rounded-2xl space-y-5 shadow-2xl relative border-cyan-500/30">
+            <div className="flex items-center justify-between border-b border-white/5 pb-3">
+              <div className="flex items-center gap-2">
+                <Edit2 className="w-4 h-4 text-cyan-400" />
+                <h3 className="text-sm font-bold text-white">Edit Contact Profile</h3>
+              </div>
+              <button
+                onClick={() => setEditingContact(null)}
+                className="text-slate-400 hover:text-white text-xs px-2 py-1 rounded bg-white/5 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="text-[11px] font-mono text-slate-400 block mb-1">
+                  Customer Name:
+                </label>
+                <input
+                  type="text"
+                  value={editingContact.name}
+                  onChange={(e) =>
+                    setEditingContact({ ...editingContact, name: e.target.value })
+                  }
+                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/10 text-white text-xs focus:border-cyan-500/50 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-mono text-slate-400 block mb-1">
+                  Phone Number (Fixed):
+                </label>
+                <input
+                  type="text"
+                  value={editingContact.phone}
+                  disabled
+                  className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/5 text-slate-500 text-xs font-mono cursor-not-allowed"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-mono text-slate-400 block mb-1">
+                  Audience Tags (comma-separated):
+                </label>
+                <input
+                  type="text"
+                  value={editingContact.tags}
+                  onChange={(e) =>
+                    setEditingContact({ ...editingContact, tags: e.target.value })
+                  }
+                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/10 text-white text-xs font-mono focus:border-cyan-500/50 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-mono text-slate-400 block mb-1">
+                  Lead Score:
+                </label>
+                <select
+                  value={editingContact.leadScore}
+                  onChange={(e) =>
+                    setEditingContact({ ...editingContact, leadScore: e.target.value })
+                  }
+                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/10 text-white text-xs focus:border-cyan-500/50 outline-none"
+                >
+                  <option value="HOT">🔥 HOT LEAD</option>
+                  <option value="WARM">🌱 WARM</option>
+                  <option value="COLD">❄️ COLD</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-white/5">
+              <button
+                onClick={() => setEditingContact(null)}
+                className="px-4 py-2 rounded-xl text-xs text-slate-400 hover:text-white bg-white/5 transition-all cursor-pointer"
+              >
+                Cancel
+              </button>
+              <CyberButton
+                variant="primary"
+                size="sm"
+                isLoading={isSavingEdit}
+                onClick={handleSaveContact}
+                icon={<Check className="w-3.5 h-3.5 text-slate-950" />}
+              >
+                Save Changes
+              </CyberButton>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
