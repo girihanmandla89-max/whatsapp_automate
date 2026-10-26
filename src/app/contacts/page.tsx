@@ -20,6 +20,7 @@ import {
   Link as LinkIcon,
   HelpCircle,
   X,
+  MessageSquare,
 } from "lucide-react";
 import { CyberButton } from "@/components/ui/CyberButton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -595,15 +596,25 @@ export default function ContactsPage() {
                     <p className="text-[11px] font-mono text-cyan-400">{c.phone}</p>
                   </div>
 
-                  <div className="text-right space-y-1">
-                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-violet-500/10 text-violet-300 border border-violet-500/20 block truncate max-w-[140px]">
-                      {c.tags}
-                    </span>
-                    <div className="flex items-center justify-end gap-1.5 text-[9px] text-slate-500 font-mono">
-                      <span className="text-slate-400 font-medium">Source: {c.source}</span>
-                      <span>•</span>
-                      <span>{c.date}</span>
+                  <div className="flex items-center gap-3">
+                    <div className="text-right space-y-1">
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-violet-500/10 text-violet-300 border border-violet-500/20 block truncate max-w-[140px]">
+                        {c.tags}
+                      </span>
+                      <div className="flex items-center justify-end gap-1.5 text-[9px] text-slate-500 font-mono">
+                        <span className="text-slate-400 font-medium">Source: {c.source}</span>
+                        <span>•</span>
+                        <span>{c.date}</span>
+                      </div>
                     </div>
+
+                    <a
+                      href={`/inbox?contactId=${c.id}`}
+                      className="p-2 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-400 transition-all flex items-center justify-center cursor-pointer shadow-sm"
+                      title="Open Live Chat in Inbox"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" />
+                    </a>
                   </div>
                 </div>
               ))

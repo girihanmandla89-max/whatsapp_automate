@@ -55,6 +55,16 @@ export default function LiveInboxPage() {
         }));
         setContacts(formatted);
         setSelectedContact((prev) => {
+          // If query param contactId provided in browser URL, select it directly
+          if (typeof window !== "undefined") {
+            const urlParams = new URLSearchParams(window.location.search);
+            const targetId = urlParams.get("contactId");
+            if (targetId) {
+              const directMatch = formatted.find((item) => item.id === targetId);
+              if (directMatch) return directMatch;
+            }
+          }
+
           if (!prev) return formatted[0];
           // Preserve currently selected contact with updated metadata
           const matched = formatted.find((item) => item.id === prev.id);

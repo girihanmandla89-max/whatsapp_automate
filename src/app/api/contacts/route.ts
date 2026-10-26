@@ -56,16 +56,75 @@ export async function GET(req: Request) {
     });
   }
 
+  const query = searchParams.get("query")?.trim();
+  const leadScore = searchParams.get("leadScore")?.trim();
+
+  const whereClause: any = { clientId };
+  if (query) {
+    whereClause.OR = [
+      { name: { contains: query } },
+      { phoneNumber: { contains: query } },
+      { tags: { contains: query } },
+    ];
+  }
+  if (leadScore && leadScore !== "ALL") {
+    whereClause.leadScore = leadScore;
+  }
+
   // Fetch client contacts
   const contacts = await prisma.contact.findMany({
-    where: { clientId },
-    orderBy: { createdAt: "desc" },
-    take: 100,
+    where: whereClause,
+    orderBy: { lastInteraction: "desc" },
+    take: 200,
   });
 
-  const totalCount = await prisma.contact.count({ where: { clientId } });
+  const totalCount = await prisma.contact.count({ where: whereClause });
 
   return NextResponse.json({ contacts, totalCount });
+}
+
+export async function PATCH(req: Request) {
+  try {
+    const body = await req.json();
+    const { contactId, name, tags, leadScore, isUnsubscribed } = body;
+
+    if (!contactId) {
+      return NextResponse.json({ error: "contactId is required" }, { status: 400 });
+    }
+
+    const updated = await prisma.contact.update({
+      where: { id: contactId },
+      data: {
+        ...(name !== undefined && { name }),
+        ...(tags !== undefined && { tags }),
+        ...(leadScore !== undefined && { leadScore }),
+        ...(isUnsubscribed !== undefined && { isUnsubscribed }),
+      },
+    });
+
+    return NextResponse.json({ success: true, contact: updated });
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}
+
+export async function DELETE(req: Request) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const contactId = searchParams.get("contactId");
+
+    if (!contactId) {
+      return NextResponse.json({ error: "contactId is required" }, { status: 400 });
+    }
+
+    await prisma.contact.delete({
+      where: { id: contactId },
+    });
+
+    return NextResponse.json({ success: true, message: "Contact deleted successfully." });
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
 }
 
 export async function POST(req: Request) {
@@ -109,16 +168,21 @@ export async function POST(req: Request) {
       const leadQuality = row["Lead Quality"] || row["score"] || "WARM";
 
       // Normalize phone number (must have digits)
-      const cleanedPhone = String(phoneRaw).replace(/\D/g, "");
-      if (!cleanedPhone || cleanedPhone.length < 7) {
+      const cleanedDigits = String(phoneRaw).replace(/\D/g, "");
+      if (!cleanedDigits || cleanedDigits.length < 7) {
         skippedCount++;
         continue;
       }
 
-      // Format with international plus prefix if missing
-      const formattedPhone = phoneRaw.toString().trim().startsWith("+")
-        ? phoneRaw.toString().trim()
-        : `+${cleanedPhone}`;
+      // Universal E.164: If 10 digits, prepend default country code (+91)
+      let formattedPhone: string;
+      if (cleanedDigits.length === 10) {
+        formattedPhone = `+91${cleanedDigits}`;
+      } else if (phoneRaw.toString().trim().startsWith("+")) {
+        formattedPhone = `+${cleanedDigits}`;
+      } else {
+        formattedPhone = `+${cleanedDigits}`;
+      }
 
       try {
         await prisma.contact.upsert({
