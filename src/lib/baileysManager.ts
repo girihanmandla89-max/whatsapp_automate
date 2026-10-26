@@ -41,14 +41,46 @@ if (process.env.NODE_ENV !== "production") {
   globalForSessions.whatsappSessions = activeSessions;
 }
 
+// Track reconnect attempts and timers per client to prevent stampedes
+const reconnectAttempts: Map<string, number> = new Map();
+const reconnectTimers: Map<string, NodeJS.Timeout> = new Map();
+
+/**
+ * Cleanly terminates any active socket and clears its event listeners.
+ */
+function cleanupExistingSocket(session?: ActiveSession) {
+  if (!session?.socket) return;
+  try {
+    session.socket.ev.removeAllListeners("connection.update");
+    session.socket.ev.removeAllListeners("creds.update");
+    session.socket.ev.removeAllListeners("messaging-history.set");
+    session.socket.ev.removeAllListeners("messages.upsert");
+    session.socket.end(undefined);
+  } catch (err) {
+    // Gracefully handle socket already closed
+  }
+}
+
 /**
  * Initializes an isolated Baileys WhatsApp session for a specific Client Workspace.
  */
 export async function initializeClientSession(clientId: string, usePairingCodePhone?: string) {
-  // If session already running and connected, return current state
+  // If a reconnect timer is currently queued, clear it
+  const existingTimer = reconnectTimers.get(clientId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    reconnectTimers.delete(clientId);
+  }
+
+  // If session is already running and connected, return current state
   const existing = activeSessions.get(clientId);
   if (existing && existing.status === "CONNECTED") {
     return existing;
+  }
+
+  // Clean up any stale or half-open socket instance before creating a new one
+  if (existing?.socket) {
+    cleanupExistingSocket(existing);
   }
 
   // Create client session folder under persistent data/sessions/
@@ -57,9 +89,6 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
   // If requesting a new pairing code or fresh session, clear unauthenticated session data first
   if (usePairingCodePhone && fs.existsSync(sessionDir)) {
     try {
-      if (existing?.socket) {
-        existing.socket.end(undefined);
-      }
       activeSessions.delete(clientId);
       fs.rmSync(sessionDir, { recursive: true, force: true });
     } catch (e) {
@@ -88,6 +117,7 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 25000,
+    markOnlineOnConnect: true,
   });
 
   const sessionRecord: ActiveSession = {
@@ -152,16 +182,29 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
       });
 
       if (shouldReconnect) {
-        console.log(`Connection dropped for client ${clientId} (code: ${statusCode}). Auto-reconnecting in 3s...`);
-        setTimeout(() => initializeClientSession(clientId), 3000);
+        const attempts = (reconnectAttempts.get(clientId) || 0) + 1;
+        reconnectAttempts.set(clientId, attempts);
+        // Exponential backoff: 3s, 6s, 12s, capped at 30s
+        const backoffMs = Math.min(3000 * Math.pow(2, attempts - 1), 30000);
+        console.log(`Connection dropped for client ${clientId} (code: ${statusCode}, attempt ${attempts}). Auto-reconnecting in ${backoffMs / 1000}s...`);
+
+        const timer = setTimeout(() => {
+          reconnectTimers.delete(clientId);
+          initializeClientSession(clientId);
+        }, backoffMs);
+        reconnectTimers.set(clientId, timer);
       } else {
-        console.log(`Client ${clientId} disconnected or handshake ended.`);
+        console.log(`Client ${clientId} disconnected or logged out (code: ${statusCode}).`);
+        reconnectAttempts.delete(clientId);
+        cleanupExistingSocket(sessionRecord);
         activeSessions.delete(clientId);
         if (statusCode === DisconnectReason.loggedOut && fs.existsSync(sessionDir)) {
           fs.rmSync(sessionDir, { recursive: true, force: true });
         }
       }
     } else if (connection === "open") {
+      // Reset reconnection attempt counter on successful handshake
+      reconnectAttempts.delete(clientId);
       sessionRecord.status = "CONNECTED";
       sessionRecord.qrCodeDataUrl = null;
       sessionRecord.pairingCode = null;
