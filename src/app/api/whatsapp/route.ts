@@ -37,7 +37,7 @@ export async function POST(req: Request) {
 
     // Action 1: Start or Request QR / Pairing Code
     if (body.action === "connect") {
-      const session = await initializeClientSession(clientId, body.phoneNumber);
+      const session = await initializeClientSession(clientId, body.phoneNumber, !!body.forceFresh);
       return NextResponse.json({
         status: session.status,
         qrCodeDataUrl: session.qrCodeDataUrl,

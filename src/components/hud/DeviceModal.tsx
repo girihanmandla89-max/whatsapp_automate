@@ -51,8 +51,12 @@ export const DeviceModal: React.FC<DeviceModalProps> = ({ isOpen, onClose, clien
     return () => clearInterval(interval);
   }, [isOpen, clientId]);
 
-  const handleStartConnection = async () => {
+  const handleStartConnection = async (forceFresh = false) => {
     setIsLoading(true);
+    if (forceFresh || activeTab === "code") {
+      setPairingCode(null);
+      setQrCodeUrl(null);
+    }
     try {
       const res = await fetch("/api/whatsapp", {
         method: "POST",
@@ -61,6 +65,7 @@ export const DeviceModal: React.FC<DeviceModalProps> = ({ isOpen, onClose, clien
           action: "connect",
           clientId,
           phoneNumber: activeTab === "code" ? phoneNumber : undefined,
+          forceFresh,
         }),
       });
       const data = await res.json();
@@ -202,7 +207,7 @@ export const DeviceModal: React.FC<DeviceModalProps> = ({ isOpen, onClose, clien
                 <CyberButton
                   variant="primary"
                   className="w-full"
-                  onClick={handleStartConnection}
+                  onClick={() => handleStartConnection(true)}
                   isLoading={isLoading}
                   icon={<RefreshCw className="w-4 h-4 text-slate-950" />}
                 >
@@ -247,7 +252,7 @@ export const DeviceModal: React.FC<DeviceModalProps> = ({ isOpen, onClose, clien
                 <CyberButton
                   variant="primary"
                   className="w-full"
-                  onClick={handleStartConnection}
+                  onClick={() => handleStartConnection(true)}
                   isLoading={isLoading}
                 >
                   {pairingCode ? "Generate New Code" : "Request 8-Digit Code"}

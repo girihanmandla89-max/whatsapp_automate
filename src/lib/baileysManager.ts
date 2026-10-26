@@ -64,7 +64,11 @@ function cleanupExistingSocket(session?: ActiveSession) {
 /**
  * Initializes an isolated Baileys WhatsApp session for a specific Client Workspace.
  */
-export async function initializeClientSession(clientId: string, usePairingCodePhone?: string) {
+export async function initializeClientSession(
+  clientId: string,
+  usePairingCodePhone?: string,
+  forceFreshSession: boolean = false
+) {
   // If a reconnect timer is currently queued, clear it
   const existingTimer = reconnectTimers.get(clientId);
   if (existingTimer) {
@@ -74,25 +78,40 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
 
   // If session is already running and connected, return current state
   const existing = activeSessions.get(clientId);
-  if (existing && existing.status === "CONNECTED") {
+  if (existing && existing.status === "CONNECTED" && !forceFreshSession && !usePairingCodePhone) {
     return existing;
   }
 
   // Clean up any stale or half-open socket instance before creating a new one
   if (existing?.socket) {
     cleanupExistingSocket(existing);
+    activeSessions.delete(clientId);
   }
 
   // Create client session folder under persistent data/sessions/
   const sessionDir = path.join(process.cwd(), "data", "sessions", `client_${clientId}`);
   
-  // If requesting a new pairing code or fresh session, clear unauthenticated session data first
-  if (usePairingCodePhone && fs.existsSync(sessionDir)) {
+  // Inspect if existing session was ever registered. If unauthenticated, corrupted, or fresh request, wipe it.
+  const credsPath = path.join(sessionDir, "creds.json");
+  let isAlreadyRegistered = false;
+  if (fs.existsSync(credsPath)) {
     try {
-      activeSessions.delete(clientId);
-      fs.rmSync(sessionDir, { recursive: true, force: true });
+      const parsedCreds = JSON.parse(fs.readFileSync(credsPath, "utf-8"));
+      isAlreadyRegistered = !!parsedCreds.registered;
     } catch (e) {
-      console.warn("Could not clear sessionDir:", e);
+      isAlreadyRegistered = false;
+    }
+  }
+
+  // Purge unauthenticated or requested fresh session directory completely
+  if (forceFreshSession || usePairingCodePhone || !isAlreadyRegistered) {
+    if (fs.existsSync(sessionDir)) {
+      try {
+        fs.rmSync(sessionDir, { recursive: true, force: true });
+        console.log(`[Baileys] Cleared unauthenticated/stale session directory for ${clientId}`);
+      } catch (e) {
+        console.warn("Could not clear sessionDir:", e);
+      }
     }
   }
 
@@ -110,8 +129,8 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
     auth: state,
     logger,
     printQRInTerminal: false,
-    // Industry Standard configuration used by Evolution API & OpenWA:
-    browser: ["Chrome (Linux)", "", ""],
+    // Production Browser Fingerprint accepted by all modern WhatsApp iOS/Android clients:
+    browser: Browsers.ubuntu("Chrome"),
     syncFullHistory: true,
     generateHighQualityLinkPreview: true,
     connectTimeoutMs: 60000,
@@ -132,21 +151,29 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
 
   activeSessions.set(clientId, sessionRecord);
 
-  // If phone number provided, request 8-digit pairing code once socket is initialized
+  // If phone number provided, request 8-digit pairing code directly
   if (usePairingCodePhone && !sock.authState.creds.registered) {
     const cleanPhone = usePairingCodePhone.replace(/\D/g, "");
-    setTimeout(async () => {
-      try {
-        const rawCode = await sock.requestPairingCode(cleanPhone);
-        const formattedCode = rawCode ? rawCode.match(/.{1,4}/g)?.join("-") || rawCode : "";
-        sessionRecord.rawPairingCode = rawCode;
-        sessionRecord.pairingCode = formattedCode;
-        sessionRecord.status = "QR_READY";
-        console.log(`[Baileys] 8-Digit Pairing Code Generated for ${cleanPhone}: ${rawCode} (${formattedCode})`);
-      } catch (err) {
-        console.error(`[Baileys] Failed to generate pairing code for ${cleanPhone}:`, err);
-      }
-    }, 2000);
+    // Wait for socket handshake, then request code
+    const pairingPromise = new Promise<string | null>((resolve) => {
+      setTimeout(async () => {
+        try {
+          const rawCode = await sock.requestPairingCode(cleanPhone);
+          const formattedCode = rawCode ? rawCode.match(/.{1,4}/g)?.join("-") || rawCode : "";
+          sessionRecord.rawPairingCode = rawCode;
+          sessionRecord.pairingCode = formattedCode;
+          sessionRecord.status = "QR_READY";
+          console.log(`[Baileys] 8-Digit Pairing Code Generated for ${cleanPhone}: ${rawCode} (${formattedCode})`);
+          resolve(formattedCode);
+        } catch (err: any) {
+          console.error(`[Baileys] Failed to generate pairing code for ${cleanPhone}:`, err?.message || err);
+          resolve(null);
+        }
+      }, 1500);
+    });
+
+    // Wait for code generation so the calling HTTP endpoint returns it immediately
+    await pairingPromise;
   }
 
   // Handle connection events
@@ -155,15 +182,14 @@ export async function initializeClientSession(clientId: string, usePairingCodePh
 
     // Stream QR code as DataURL (only when phone pairing code wasn't requested)
     if (qr && !usePairingCodePhone) {
-      // Standardize QR string payload: strip URL wrapper if present so both old and new WA scanners read it
-      const qrPayload = qr.includes("#") ? qr.split("#")[1] : qr;
-      sessionRecord.qrCodeDataUrl = await QRCode.toDataURL(qrPayload, {
+      sessionRecord.qrCodeDataUrl = await QRCode.toDataURL(qr, {
         margin: 2,
-        width: 256,
+        width: 320,
+        errorCorrectionLevel: "M",
         color: { dark: "#000000", light: "#ffffff" },
       });
       sessionRecord.status = "QR_READY";
-      console.log(`[Baileys] Valid QR Code Generated for ${clientId}: ${qrPayload.substring(0, 30)}...`);
+      console.log(`[Baileys] Fresh QR Generated for ${clientId}: ${qr.substring(0, 35)}...`);
     }
 
     if (connection === "close") {
