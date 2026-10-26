@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   Inbox,
   User,
@@ -13,6 +13,8 @@ import {
   AlertTriangle,
   Clock,
   Tag,
+  CheckCheck,
+  Filter,
 } from "lucide-react";
 import { CyberButton } from "@/components/ui/CyberButton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -36,6 +38,13 @@ export default function LiveInboxPage() {
   >([]);
   const [replyInput, setReplyInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [activeFilter, setActiveFilter] = useState<"ALL" | "HOT" | "TAKEOVER">("ALL");
+
+  // Drafts cache per contact so switching conversations preserves typed text
+  const draftsRef = useRef<{ [contactId: string]: string }>({});
+  // Scroll anchor ref for smooth, non-intrusive auto-scrolling
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // 1. Fetch live WhatsApp contacts
   const fetchLiveInbox = async () => {
@@ -113,11 +122,51 @@ export default function LiveInboxPage() {
 
   useEffect(() => {
     if (selectedContact?.id) {
+      // Restore draft input for selected contact
+      setReplyInput(draftsRef.current[selectedContact.id] || "");
       fetchContactMessages(selectedContact.id);
       const msgInterval = setInterval(() => fetchContactMessages(selectedContact.id), 3000);
       return () => clearInterval(msgInterval);
     }
   }, [selectedContact?.id]);
+
+  // Auto-scroll to latest message when messages array updates
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
+
+  const handleSelectContact = (contact: ContactItem) => {
+    if (selectedContact) {
+      // Save draft before switching
+      draftsRef.current[selectedContact.id] = replyInput;
+    }
+    setSelectedContact(contact);
+  };
+
+  const handleReplyInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setReplyInput(val);
+    if (selectedContact) {
+      draftsRef.current[selectedContact.id] = val;
+    }
+  };
+
+  // Filtered contacts based on search and active tab
+  const filteredContacts = useMemo(() => {
+    return contacts.filter((c) => {
+      const q = searchQuery.toLowerCase().trim();
+      const matchQuery =
+        !q ||
+        c.name.toLowerCase().includes(q) ||
+        c.phone.includes(q) ||
+        c.lastMessage.toLowerCase().includes(q);
+
+      if (!matchQuery) return false;
+      if (activeFilter === "HOT") return c.leadScore === "HOT";
+      if (activeFilter === "TAKEOVER") return c.isHumanTakeover;
+      return true;
+    });
+  }, [contacts, searchQuery, activeFilter]);
 
   const toggleTakeover = async () => {
     if (!selectedContact) return;
@@ -206,57 +255,104 @@ export default function LiveInboxPage() {
           <div className="p-4 border-b border-white/5 space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-300">Active Conversations</span>
-              <span className="text-[11px] font-mono text-cyan-400">3 Conversations</span>
+              <span className="text-[11px] font-mono text-cyan-400">
+                {filteredContacts.length} of {contacts.length}
+              </span>
             </div>
+
+            {/* Instant Client-Side Search */}
             <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-3" />
+              <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
               <input
                 type="text"
                 placeholder="Search phone or name..."
-                className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-black/40 border border-white/5 text-xs text-white placeholder-slate-500 outline-none"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-black/40 border border-white/10 hover:border-cyan-500/40 focus:border-cyan-500 text-xs text-white placeholder-slate-500 outline-none transition-all font-mono"
               />
+            </div>
+
+            {/* Filter Chips */}
+            <div className="flex items-center gap-1.5 pt-1">
+              <button
+                onClick={() => setActiveFilter("ALL")}
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-mono transition-all cursor-pointer ${
+                  activeFilter === "ALL"
+                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
+                    : "bg-white/5 text-slate-400 hover:text-white"
+                }`}
+              >
+                All ({contacts.length})
+              </button>
+              <button
+                onClick={() => setActiveFilter("HOT")}
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-mono transition-all cursor-pointer ${
+                  activeFilter === "HOT"
+                    ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                    : "bg-white/5 text-slate-400 hover:text-white"
+                }`}
+              >
+                🔥 Hot Leads
+              </button>
+              <button
+                onClick={() => setActiveFilter("TAKEOVER")}
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-mono transition-all cursor-pointer ${
+                  activeFilter === "TAKEOVER"
+                    ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                    : "bg-white/5 text-slate-400 hover:text-white"
+                }`}
+              >
+                👤 Takeover
+              </button>
             </div>
           </div>
 
           <div className="flex-1 overflow-y-auto divide-y divide-white/5">
-            {contacts.map((contact) => (
-              <button
-                key={contact.id}
-                onClick={() => setSelectedContact(contact)}
-                className={`w-full text-left p-4 transition-all flex flex-col gap-1.5 cursor-pointer ${
-                  selectedContact?.id === contact.id
-                    ? "bg-cyan-500/10 border-l-2 border-cyan-400"
-                    : "hover:bg-white/[0.02]"
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-slate-200">{contact.name}</span>
-                  <span className="text-[10px] text-slate-500 font-mono">{contact.time}</span>
-                </div>
-                <p className="text-[11px] font-mono text-slate-400">{contact.phone}</p>
-                <p className="text-xs text-slate-400 truncate">"{contact.lastMessage}"</p>
-                <div className="flex items-center gap-2 mt-1">
-                  <span
-                    className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${
-                      contact.leadScore === "HOT"
-                        ? "bg-rose-500/10 text-rose-400 border-rose-500/30 font-bold"
-                        : "bg-cyan-500/10 text-cyan-400 border-cyan-500/20"
-                    }`}
-                  >
-                    {contact.leadScore === "HOT" ? "🔥 HOT LEAD" : "🌱 WARM"}
-                  </span>
-                  {contact.isHumanTakeover ? (
-                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                      👤 HUMAN TAKEOVER
+            {filteredContacts.length > 0 ? (
+              filteredContacts.map((contact) => (
+                <button
+                  key={contact.id}
+                  onClick={() => handleSelectContact(contact)}
+                  className={`w-full text-left p-4 transition-all flex flex-col gap-1.5 cursor-pointer ${
+                    selectedContact?.id === contact.id
+                      ? "bg-cyan-500/10 border-l-2 border-cyan-400"
+                      : "hover:bg-white/[0.02]"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-200">{contact.name}</span>
+                    <span className="text-[10px] text-slate-500 font-mono">{contact.time}</span>
+                  </div>
+                  <p className="text-[11px] font-mono text-slate-400">{contact.phone}</p>
+                  <p className="text-xs text-slate-400 truncate">"{contact.lastMessage}"</p>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span
+                      className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${
+                        contact.leadScore === "HOT"
+                          ? "bg-rose-500/10 text-rose-400 border-rose-500/30 font-bold"
+                          : "bg-cyan-500/10 text-cyan-400 border-cyan-500/20"
+                      }`}
+                    >
+                      {contact.leadScore === "HOT" ? "🔥 HOT LEAD" : "🌱 WARM"}
                     </span>
-                  ) : (
-                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400 border border-violet-500/20">
-                      🤖 AI ACTIVE
-                    </span>
-                  )}
-                </div>
-              </button>
-            ))}
+                    {contact.isHumanTakeover ? (
+                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                        👤 HUMAN TAKEOVER
+                      </span>
+                    ) : (
+                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400 border border-violet-500/20">
+                        🤖 AI ACTIVE
+                      </span>
+                    )}
+                  </div>
+                </button>
+              ))
+            ) : (
+              <div className="p-8 text-center space-y-2">
+                <Search className="w-6 h-6 text-slate-600 mx-auto" />
+                <p className="text-xs text-slate-400">No conversations match criteria</p>
+              </div>
+            )}
           </div>
         </div>
 
@@ -347,6 +443,8 @@ export default function LiveInboxPage() {
                     </div>
                   ))
                 )}
+                {/* Scroll Anchor */}
+                <div ref={messagesEndRef} />
               </div>
 
               {/* Reply Bar */}
@@ -359,8 +457,8 @@ export default function LiveInboxPage() {
                       : "Type to reply manually (auto-takes over from AI)..."
                   }
                   value={replyInput}
-                  onChange={(e) => setReplyInput(e.target.value)}
-                  className="flex-1 px-4 py-2.5 rounded-xl bg-black/40 border border-white/10 text-white text-xs focus:border-cyan-500/50 outline-none"
+                  onChange={handleReplyInputChange}
+                  className="flex-1 px-4 py-2.5 rounded-xl bg-black/40 border border-white/10 text-white text-xs focus:border-cyan-500/50 outline-none font-sans"
                 />
                 <CyberButton
                   type="submit"
